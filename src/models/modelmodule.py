@@ -1,4 +1,4 @@
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional, List
 
 import hydra
 import torch
@@ -6,20 +6,19 @@ import rootutils
 import numpy as np
 from omegaconf import DictConfig
 from lightning import LightningModule
-from torchmetrics import MinMetric, MeanMetric
+from torchmetrics import MinMetric, MeanMetric, MaxMetric, Accuracy
 from torchmetrics.detection import MeanAveragePrecision
-from src.model.mask_rcnn import MaskRCNN  # Import your MaskRCNN class
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-class model_module(LightningModule):
+class PoseNetModule(LightningModule):
     def __init__(
         self,
         net: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         compile: bool = False,
-        num_classes: int = 7,  # Specify the number of classes (including background)
+        num_classes: int = 8,
     ) -> None:
         super().__init__()
 
@@ -33,9 +32,9 @@ class model_module(LightningModule):
         # Loss function (Mask R-CNN handles its own losses)
 
         # Metric objects for detection and segmentation
-        self.train_map = MeanAveragePrecision(num_classes=num_classes)
-        self.val_map = MeanAveragePrecision(num_classes=num_classes)
-        self.test_map = MeanAveragePrecision(num_classes=num_classes)
+        self.train_map = MeanAveragePrecision(iou_type="segm")
+        self.val_map = MeanAveragePrecision(iou_type="segm")
+        self.test_map = MeanAveragePrecision(iou_type="segm")
 
         # for averaging loss across batches (we'll track the losses returned by Mask R-CNN)
         self.train_loss_rpn = MeanMetric()
@@ -49,7 +48,7 @@ class model_module(LightningModule):
         self.test_loss_mask = MeanMetric()
 
         # for tracking best so far validation mAP
-        self.val_map_best = MinMetric() # Changed to MinMetric for loss, consider MaxMetric for mAP
+        self.val_map_best = MaxMetric()
 
     def forward(self, x: torch.Tensor, targets: Optional[List[Dict]] = None) -> Dict[str, torch.Tensor]:
         return self.net(x, targets)
@@ -66,11 +65,12 @@ class model_module(LightningModule):
         images, targets = batch
         outputs = self.forward(images, targets)
         if self.training:
-            losses = outputs[0]
+            outputs = self.net(images, targets)
+            losses = outputs
             predictions = None
         else:
+            predictions = self.net(images)
             losses = {}
-            predictions = outputs
         return losses, predictions, targets
 
     def training_step(
@@ -102,7 +102,8 @@ class model_module(LightningModule):
         self.val_loss_rpn(losses.get("loss_rpn", torch.tensor(0.0, device=self.device)))
         self.val_loss_classifier(losses.get("loss_classifier", torch.tensor(0.0, device=self.device)))
         self.val_loss_mask(losses.get("loss_mask", torch.tensor(0.0, device=self.device)))
-
+        total_loss = sum(loss for loss in losses.values())
+        self.log("val/loss_toal", total_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/loss_rpn", self.val_loss_rpn, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/loss_classifier", self.val_loss_classifier, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/loss_mask", self.val_loss_mask, on_step=False, on_epoch=True, prog_bar=True)
@@ -148,7 +149,7 @@ class model_module(LightningModule):
                 "optimizer": optimizer,
                 "lr_scheduler": {
                     "scheduler": scheduler,
-                    "monitor": "val/map_best", # Changed monitor to mAP
+                    "monitor": "val/loss_total",
                     "interval": "epoch",
                     "frequency": 1,
                 },

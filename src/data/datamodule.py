@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, random_split
 from src.data.components.dataset import BaseDataset  # Assuming your BaseDataset is in this file
-from src.data.components.cervical_dataset import CervicalDataset  # Import the corrected CervicalDataset
+from src.data.components.dataset import CervicalDataset  # Import the corrected CervicalDataset
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
@@ -78,9 +78,19 @@ class DataModule(LightningDataModule):
 
     def train_dataloader(self):
         def collate_fn(batch):
+            batch = [b for b in batch if b is not None and isinstance(b, tuple) and len(b) == 2]
+            if not batch:
+                raise ValueError("Empty batch after filtering")
+
             images = [item[0] for item in batch]
             targets = [item[1] for item in batch]
-            images = torch.stack(images)
+
+            try:
+                images = torch.stack(images)
+            except RuntimeError as e:
+                print(f"Error stacking images: {e}")
+                # Có thể thêm xử lý fallback nếu cần
+                raise e
             return images, targets
 
         return DataLoader(
@@ -141,7 +151,7 @@ def main(cfg: DictConfig) -> Optional[float]:
     batch = next(iter(train_loader))
     images, targets = batch
     print("Image batch shape:", images.shape)
-    print("Number of targets:", len(targets))
+    print("  ber of targets:", len(targets))
     print("Example target keys:", targets[0].keys())
     print("Example target boxes shape:", targets[0]['boxes'].shape)
     print("Example target labels shape:", targets[0]['labels'].shape)

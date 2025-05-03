@@ -1,4 +1,4 @@
-_target_: src.models.mnist_module.MNISTLitModule
+_target_: src.models.modelmodule.PoseNetModule
 
 optimizer:
   _target_: torch.optim.Adam
@@ -14,7 +14,9 @@ scheduler:
   patience: 10
 
 net:
-  _target_: src.models.Mask_RCNN
+  _target_: src.models.components.CustomMaskRCNN.get_maskrcnn_with_backbone
+  pretrained: true
+  num_classes: 8
 
 # compile model for faster training with pytorch 2.0
 compile: false

@@ -1,21 +1,37 @@
-import torch
-from torch import nn
+from torchvision import models
+from torchvision.models.detection.backbone_utils import BackboneWithFPN
+from torchvision.ops.feature_pyramid_network import LastLevelMaxPool
+import torch.nn as nn
 
-class ResNet101Backbone(nn.Module):
-    """ResNet-101 backbone for feature extraction in Mask R-CNN."""
-    def __init__(self, pretrained=True):
-        super().__init__()
-        resnet = models.resnet101(weights=models.ResNet101_Weights.DEFAULT if pretrained else None)
-        self.conv1 = nn.Sequential(*list(resnet.children())[:4])
-        self.layer1 = resnet.layer1
-        self.layer2 = resnet.layer2
-        self.layer3 = resnet.layer3
-        self.layer4 = resnet.layer4
+def get_resnet101_fpn_backbone(pretrained=True, out_channels=256):
+    resnet = models.resnet101(weights=models.ResNet101_Weights.DEFAULT if pretrained else None)
 
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.layer1(x)
-        x = self.layer2(x) 
-        x = self.layer3(x) 
-        x = self.layer4(x)
-        return [x]
+    # Remove fully connected layers
+    backbone = nn.Sequential(
+        resnet.conv1,
+        resnet.bn1,
+        resnet.relu,
+        resnet.maxpool,
+        resnet.layer1,
+        resnet.layer2,
+        resnet.layer3,
+        resnet.layer4,
+    )
+
+    return_layers = {
+        '4': '0',  # resnet.layer1
+        '5': '1',  # resnet.layer2
+        '6': '2',  # resnet.layer3
+        '7': '3',  # resnet.layer4
+    }
+
+    in_channels_list = [256, 512, 1024, 2048]
+
+    fpn_backbone = BackboneWithFPN(
+        backbone=backbone,
+        return_layers=return_layers,
+        in_channels_list=in_channels_list,
+        out_channels=out_channels,
+        extra_blocks=LastLevelMaxPool()
+    )
+    return fpn_backbone

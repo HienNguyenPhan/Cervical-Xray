@@ -25,4 +25,5 @@ pycocotools     # for rle decoding
 torchmetrics
 albumentations
 opencv-python
+wandb
 # sh            # for running bash commands in some tests (linux/macos only)
