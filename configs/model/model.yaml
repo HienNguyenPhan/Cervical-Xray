@@ -16,7 +16,7 @@ scheduler:
 net:
   _target_: src.models.components.CustomMaskRCNN.get_maskrcnn_with_backbone
   pretrained: true
-  num_classes: 8
+  num_classes: 7
 
 # compile model for faster training with pytorch 2.0
 compile: false

@@ -18,7 +18,7 @@ class PoseNetModule(LightningModule):
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
         compile: bool = False,
-        num_classes: int = 8,
+        num_classes: int = 7,
     ) -> None:
         super().__init__()
 

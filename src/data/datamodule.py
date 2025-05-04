@@ -17,13 +17,13 @@ class DataModule(LightningDataModule):
         self,
         xml_path: str,
         train_test_split: Tuple[float, float] = (0.9, 0.1),
-        train_batch_size: int = 32,
-        test_batch_size: int = 64,
+        train_batch_size: int = 16,
+        test_batch_size: int = 32,
         num_workers: int = 4,
         train_transforms: Optional[A.Compose] = None,
         test_transforms: Optional[A.Compose] = None,
         pin_memory: bool = False,
-        class_names: Tuple[str, ...] = ('C2', 'C2_lower', 'C3', 'C4', 'C5', 'C6', 'C7'),
+        class_names: Tuple[str, ...] = ('C2', 'C3', 'C4', 'C5', 'C6', 'C7'),
     ) -> None:
         super().__init__()
 
@@ -77,61 +77,33 @@ class DataModule(LightningDataModule):
             self.data_test.dataset.transform = self.test_transforms
 
     def train_dataloader(self):
-        def collate_fn(batch):
-            batch = [b for b in batch if b is not None and isinstance(b, tuple) and len(b) == 2]
-            if not batch:
-                raise ValueError("Empty batch after filtering")
-
-            images = [item[0] for item in batch]
-            targets = [item[1] for item in batch]
-
-            try:
-                images = torch.stack(images)
-            except RuntimeError as e:
-                print(f"Error stacking images: {e}")
-                # Có thể thêm xử lý fallback nếu cần
-                raise e
-            return images, targets
-
         return DataLoader(
             dataset=self.data_train,
             batch_size=self.train_batch_size_per_device,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             shuffle=True,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def val_dataloader(self):
-        def collate_fn(batch):
-            images = [item[0] for item in batch]
-            targets = [item[1] for item in batch]
-            images = torch.stack(images)
-            return images, targets
-
         return DataLoader(
             dataset=self.data_val,
             batch_size=self.test_batch_size_per_device,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             shuffle=False,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def test_dataloader(self):
-        def collate_fn(batch):
-            images = [item[0] for item in batch]
-            targets = [item[1] for item in batch]
-            images = torch.stack(images)
-            return images, targets
-
         return DataLoader(
             dataset=self.data_test,
             batch_size=self.test_batch_size_per_device,
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             shuffle=False,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def teardown(self, stage: Optional[str] = None) -> None:
@@ -142,6 +114,19 @@ class DataModule(LightningDataModule):
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         pass
+
+    def collate_fn(self, batch):
+        batch = [b for b in batch if b is not None and isinstance(b, tuple) and len(b) == 2]
+        if not batch:
+            raise ValueError("Empty batch after filtering")
+        images = [item[0] for item in batch]
+        targets = [item[1] for item in batch]
+        try:
+            images = torch.stack(images)
+        except RuntimeError as e:
+            print(f"Error stacking images: {e}")
+            raise e
+        return images, targets
 
 @hydra.main(version_base="1.3", config_path="../../configs/data", config_name="data")
 def main(cfg: DictConfig) -> Optional[float]:

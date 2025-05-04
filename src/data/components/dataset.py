@@ -8,16 +8,42 @@ import albumentations as A
 from torch.utils.data import Dataset
 from xml.etree import ElementTree
 import pycocotools.mask as mask_utils
+import logging
+
+# Thiết lập logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 def rle_decode(rle, shape):
-    """Decodes COCO RLE encoded mask."""
+    """Decodes COCO RLE encoded mask from comma-separated string."""
     try:
-        if isinstance(rle, str):
-            rle = mask_utils.frPyObjects({'counts': rle, 'size': shape}, shape[0], shape[1])
-        return mask_utils.decode(rle).reshape(shape).astype(np.uint8)
+        if isinstance(rle, dict) and 'counts' in rle and 'size' in rle:
+            rle_obj = rle
+        elif isinstance(rle, str):
+            counts = [int(x.strip()) for x in rle.split(',') if x.strip()]
+            if not counts:
+                raise ValueError("Empty RLE counts after parsing")
+            rle_obj = {'counts': counts, 'size': shape}
+        else:
+            raise ValueError(f"Invalid RLE format: {rle}")
+
+        counts = [int(x.strip()) for x in rle.split(',') if x.strip()]
+        total_pixels = shape[0] * shape[1]
+        sum_counts = sum(counts)
+        if sum_counts > total_pixels:
+            logger.warning(f"RLE counts sum ({sum_counts}) exceeds total pixels ({total_pixels}) for shape {shape}")
+            return np.zeros(shape, dtype=np.uint8)
+
+        decoded = mask_utils.frPyObjects(rle_obj, shape[0], shape[1])
+        mask = mask_utils.decode(decoded).reshape(shape).astype(np.uint8)
+        if mask.sum() == 0:
+            logger.warning(f"Decoded RLE mask is empty for shape {shape}")
+        return mask
     except Exception as e:
-        print(f"Error decoding RLE: {e}")
+        logger.error(f"Error decoding RLE: {e}, input RLE: {rle}, shape: {shape}")
         return np.zeros(shape, dtype=np.uint8)
+
 
 class BaseDataset(Dataset):
     def __init__(self, xml_path):
@@ -34,6 +60,9 @@ class BaseDataset(Dataset):
         return img_file, annotation
 
     def _parse_data(self):
+        if not os.path.exists(self.xml_path):
+            raise FileNotFoundError(f"Annotation file not found at: {self.xml_path}")
+
         tree = ElementTree.parse(self.xml_path)
         root = tree.getroot()
         img_folder = os.path.dirname(self.xml_path)
@@ -65,7 +94,8 @@ class BaseDataset(Dataset):
 
 
 class CervicalDataset(Dataset):
-    def __init__(self, xml_path, class_names=('C2', 'C2_lower', 'C3', 'C4', 'C5', 'C6', 'C7'), mode='train', transform=None):
+    def __init__(self, xml_path, class_names=('C2', 'C3', 'C4', 'C5', 'C6', 'C7'), mode='train',
+                 transform=None):
         self.dataset = BaseDataset(xml_path)
         self.mode = mode
         self.transform = transform
@@ -78,66 +108,121 @@ class CervicalDataset(Dataset):
     def __getitem__(self, index):
         img_file, annotation_data = self.dataset.__getitem__(index)
         img = cv2.imread(img_file)
+        if img is None:
+            logger.warning(f"Could not read image {img_file}, returning random sample")
+            return self.__getitem__(random.randint(0, self.__len__() - 1))
+
         height, width = img.shape[:2]
         masks = []
         labels = []
         boxes = []
 
         for label_name, mask_data in annotation_data['labels'].items():
-            if label_name in self.class_names:
-                rle = mask_data['rle']
-                mask = rle_decode({'size': [mask_data['height'], mask_data['width']], 'counts': rle},
-                                  (mask_data['height'], mask_data['width']))
-                left = mask_data['left']
-                top = mask_data['top']
+            if label_name not in self.class_names:
+                logger.debug(f"Skipping label {label_name} not in class_names")
+                continue
 
-                # Pad the mask to the original image size
-                full_mask = np.zeros((height, width), dtype=np.uint8)
+            rle = mask_data['rle']
+            logger.debug(f"Processing RLE for {label_name}: {rle}")
+            mask = rle_decode(rle, (mask_data['height'], mask_data['width']))
+            left = mask_data['left']
+            top = mask_data['top']
+
+            # Kiểm tra mask hợp lệ
+            if mask.shape != (mask_data['height'], mask_data['width']):
+                logger.warning(
+                    f"Invalid mask shape {mask.shape} for {label_name}, expected {mask_data['height']}x{mask_data['width']}")
+                continue
+            if mask.sum() == 0:
+                logger.warning(f"Empty mask for {label_name}")
+                continue
+
+            full_mask = np.zeros((height, width), dtype=np.uint8)
+            try:
                 full_mask[top:top + mask_data['height'], left:left + mask_data['width']] = mask
+            except ValueError as e:
+                logger.error(
+                    f"Error placing mask for {label_name}: {e}, top={top}, left={left}, mask_shape={mask.shape}")
+                continue
 
-                # Extract bounding box from the mask
-                y_indices, x_indices = np.where(full_mask > 0)
-                if len(y_indices) > 0 and len(x_indices) > 0:
-                    ymin, ymax = np.min(y_indices), np.max(y_indices)
-                    xmin, xmax = np.min(x_indices), np.max(x_indices)
-                    # Đảm bảo box hợp lệ
-                    if xmax > xmin and ymax > ymin:
-                        boxes.append([xmin, ymin, xmax, ymax])
-                        masks.append(full_mask)
-                        labels.append(self.class_map[label_name])
+            y_indices, x_indices = np.where(full_mask > 0)
+            if len(y_indices) > 0 and len(x_indices) > 0:
+                ymin, ymax = np.min(y_indices), np.max(y_indices)
+                xmin, xmax = np.min(x_indices), np.max(x_indices)
+                if xmax > xmin and ymax > ymin:
+                    boxes.append([xmin, ymin, xmax, ymax])
+                    masks.append(full_mask)
+                    labels.append(self.class_map[label_name])
+                else:
+                    logger.warning(f"Invalid bounding box for {label_name}: [{xmin}, {ymin}, {xmax}, {ymax}]")
+            else:
+                logger.warning(f"No valid pixels in mask for {label_name}")
 
-        # Convert to tensors
+        # Chuyển đổi sang tensor
         boxes = torch.as_tensor(boxes, dtype=torch.float32)
         labels = torch.as_tensor(labels, dtype=torch.int64)
-        masks = torch.as_tensor(np.array(masks), dtype=torch.uint8)
+        masks = np.array(masks, dtype=np.uint8)  # Chuyển thành mảng NumPy 3D: (num_masks, H, W)
+
+        # Kiểm tra hình dạng của masks
+        if masks.size == 0:
+            logger.warning(f"No valid masks for image {img_file}, creating empty masks")
+            masks = np.zeros((0, height, width), dtype=np.uint8)
+        else:
+            logger.info(f"Masks shape before transform: {masks.shape}")
 
         if self.transform:
-            transformed = self.transform(image=img, masks=masks.numpy(), bboxes=boxes.numpy(), labels=labels.numpy())
-            img = transformed['image']
-            masks = torch.as_tensor(transformed['masks'], dtype=torch.uint8)
-            boxes = torch.as_tensor(transformed['bboxes'], dtype=torch.float32)
-            labels = torch.as_tensor(transformed['labels'], dtype=torch.int64)
+            try:
+                transformed = self.transform(
+                    image=img,
+                    masks=masks,  # Truyền NumPy array 3D
+                    bboxes=boxes.numpy(),
+                    labels=labels.numpy()
+                )
+                img = transformed['image']
+                if not isinstance(img, torch.Tensor):
+                    img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+                masks = np.array(transformed['masks'], dtype=np.uint8)  # Đảm bảo masks là NumPy 3D
+                boxes = torch.as_tensor(transformed['bboxes'], dtype=torch.float32)
+                labels = torch.as_tensor(transformed['labels'], dtype=torch.int64)
 
-            valid_indices = []
-            for i, (box, mask) in enumerate(zip(boxes, masks)):
-                if box[2] > box[0] and box[3] > box[1] and mask.sum() > 0:
-                    valid_indices.append(i)
+                # Kiểm tra và lọc các mask/bbox hợp lệ sau transform
+                valid_indices = []
+                for i, (box, mask) in enumerate(zip(boxes, masks)):
+                    if box[2] > box[0] and box[3] > box[1] and mask.sum() > 0:
+                        valid_indices.append(i)
+                    else:
+                        logger.warning(f"Invalid transformed mask/bbox at index {i}")
 
-            if len(valid_indices) > 0:
-                boxes = boxes[valid_indices]
-                masks = masks[valid_indices]
-                labels = labels[valid_indices]
-            else:
+                if len(valid_indices) > 0:
+                    boxes = boxes[valid_indices]
+                    masks = masks[valid_indices]
+                    labels = labels[valid_indices]
+                else:
+                    logger.warning(f"No valid masks/bboxes after transform for image {img_file}")
+                    boxes = torch.zeros((0, 4), dtype=torch.float32)
+                    masks = np.zeros((0, height, width), dtype=np.uint8)
+                    labels = torch.zeros((0,), dtype=torch.int64)
+            except Exception as e:
+                logger.error(f"Error applying transforms: {e}, returning empty sample")
                 boxes = torch.zeros((0, 4), dtype=torch.float32)
-                masks = torch.zeros((0, height, width), dtype=torch.uint8)
+                masks = np.zeros((0, height, width), dtype=np.uint8)
                 labels = torch.zeros((0,), dtype=torch.int64)
 
-        target = {}
-        target['boxes'] = boxes
-        target['labels'] = labels
-        target['masks'] = masks
+        # Chuyển masks thành tensor sau transform
+        masks = torch.as_tensor(masks, dtype=torch.uint8)
+
+        target = {
+            'boxes': boxes,
+            'labels': labels,
+            'masks': masks,
+            'image_id': torch.tensor([index]),
+            'area': (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]) if len(boxes) > 0 else torch.zeros((0,),
+                                                                                                                 dtype=torch.float32),
+            'iscrowd': torch.zeros((len(boxes),), dtype=torch.int64)
+        }
 
         return img, target
+
 
 if __name__ == "__main__":
     pass
